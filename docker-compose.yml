@@ -1,0 +1,13 @@
+version: "3.8"
+services:
+  lbot:
+    build: .
+    restart: always
+    environment:
+      - SYMBOL=${SYMBOL:-XAUUSD}
+      - TIMEFRAME=${TIMEFRAME:-M15}
+      - DEMO_MODE=${DEMO_MODE:-true}
+      - TZ=${TZ:-UTC}
+    volumes:
+      - ./models:/app/models
+      - ./data:/app/data

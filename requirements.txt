@@ -1,0 +1,7 @@
+numpy
+pandas
+ta
+gymnasium
+stable-baselines3==2.3.2
+tqdm
+pytz
