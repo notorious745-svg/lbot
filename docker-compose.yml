@@ -2,12 +2,30 @@ version: "3.8"
 services:
   lbot:
     build: .
-    restart: always
+    restart: unless-stopped
     environment:
-      - SYMBOL=${SYMBOL:-XAUUSD}
-      - TIMEFRAME=${TIMEFRAME:-M15}
-      - DEMO_MODE=${DEMO_MODE:-true}
-      - TZ=${TZ:-UTC}
+      SYMBOL: ${SYMBOL:-XAUUSD}
+      TIMEFRAME: ${TIMEFRAME:-M15}
+      DEMO_MODE: ${DEMO_MODE:-true}
+
+      # ชี้ไฟล์โมเดลในคอนเทนเนอร์ (ต้องตรงกับไฟล์จริงใน ./models)
+      MODEL_PATH: ${MODEL_PATH:-models/lbot_ppo.zip}
+
+      # ถ้ามี CSV ให้ซิมแทน realtime ก็ใส่ไว้ได้ (ไม่ใส่ก็ปล่อยว่าง)
+      CSV_PATH: ${CSV_PATH:-data/XAUUSD_15m_sample.csv}
+
+      # timezone
+      TZ: ${TZ:-UTC}
+
+      # (ปรับได้) พารามิเตอร์ risk/ATR
+      ATR_PERIOD: ${ATR_PERIOD:-14}
+      ATR_SL_MULT: ${ATR_SL_MULT:-2.0}
+      ATR_TRAIL_MULT: ${ATR_TRAIL_MULT:-1.0}
+      BE_AFTER_ATR: ${BE_AFTER_ATR:-0.5}
+      RISK_PCT_TRADE: ${RISK_PCT_TRADE:-0.005}
+      LOT_SIZE: ${LOT_SIZE:-1.0}
+
     volumes:
       - ./models:/app/models
       - ./data:/app/data
+      - ./logs:/app/logs
