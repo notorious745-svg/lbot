@@ -1,42 +1,49 @@
-# lbot/features.py
-import numpy as np
+# features.py
 import pandas as pd
+import numpy as np
+import ta
 
-def build_state_features(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    รับ df ที่มีคอลัมน์อย่างน้อย: time, open, high, low, close, volume
-    คืน DataFrame ฟีเจอร์ที่ 'คงรูป' ใช้ได้ทั้งตอนเทรนและตอน live
-    """
+def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
 
-    # ensure base cols
-    base = ["open","high","low","close","volume"]
-    for c in base:
-        if c not in df.columns:
-            df[c] = np.nan
+    # EMA ต่าง ๆ
+    df["ema10"]  = ta.trend.ema_indicator(df["close"], window=10)
+    df["ema25"]  = ta.trend.ema_indicator(df["close"], window=25)
+    df["ema50"]  = ta.trend.ema_indicator(df["close"], window=50)
+    df["ema100"] = ta.trend.ema_indicator(df["close"], window=100)  # <== เพิ่ม
 
-    # returns & ranges
-    df["ret_1"]   = df["close"].pct_change(1).fillna(0.0)
-    df["ret_3"]   = df["close"].pct_change(3).fillna(0.0)
-    df["ret_6"]   = df["close"].pct_change(6).fillna(0.0)
-    df["hl_range"] = (df["high"] - df["low"]) / df["close"].replace(0, np.nan)
-    df["oc_range"] = (df["close"] - df["open"]) / df["open"].replace(0, np.nan)
+    # Momentum / RSI / ROC
+    df["rsi"]    = ta.momentum.rsi(df["close"], window=14)
+    df["roc10"]  = ta.momentum.roc(df["close"], window=10)          # <== เพิ่ม
 
-    # rolling stats
-    def _roll(z, w): return z.rolling(w, min_periods=1)
-    df["vol_10"]  = _roll(df["ret_1"], 10).std().fillna(0.0)
-    df["vol_30"]  = _roll(df["ret_1"], 30).std().fillna(0.0)
-    df["ma_10"]   = _roll(df["close"], 10).mean().fillna(method="bfill")
-    df["ma_30"]   = _roll(df["close"], 30).mean().fillna(method="bfill")
-    df["ma_gap"]  = (df["ma_10"] - df["ma_30"]) / df["ma_30"].replace(0, np.nan)
+    # ATR
+    df["atr"] = ta.volatility.average_true_range(
+        df["high"], df["low"], df["close"], window=14
+    )
 
-    # volume features
-    df["v_ma_10"] = _roll(df["volume"], 10).mean().replace(0, np.nan)
-    df["v_rel"]   = df["volume"] / df["v_ma_10"]
-    df["v_rel"]   = df["v_rel"].replace([np.inf, -np.inf], np.nan).fillna(1.0)
+    # Turtle channel
+    df["turtle_high20"] = df["high"].rolling(20).max()
+    df["turtle_low20"]  = df["low"].rolling(20).min()
+    df["turtle_high55"] = df["high"].rolling(55).max()
+    df["turtle_low55"]  = df["low"].rolling(55).min()
 
-    # เลือกเฉพาะคอลัมน์ที่เป็นตัวเลข
-    feats = df.select_dtypes(include=[np.number]).copy()
-    feats = feats.replace([np.inf, -np.inf], np.nan).fillna(0.0)
+    # จัด index ให้สะอาด
+    df = df.dropna().reset_index(drop=True)
+    return df
 
-    return feats
+def normalize_features(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    num_cols = df.select_dtypes(include=[np.number]).columns
+    if len(num_cols) == 0:
+        return df
+    mean = df[num_cols].mean()
+    std  = df[num_cols].std().replace(0, 1.0)
+    df[num_cols] = (df[num_cols] - mean) / (std + 1e-9)
+    return df
+
+def build_state_features(df: pd.DataFrame) -> pd.DataFrame:
+    df = add_indicators(df)
+    df = normalize_features(df)
+    # ใช้เฉพาะคอลัมน์ตัวเลข (OHLCV + อินดิเคเตอร์) -> ควรได้ 16 คอลัมน์
+    num = df.select_dtypes(include=[np.number]).columns
+    return df[num]
