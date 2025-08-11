@@ -1,0 +1,10 @@
+name: Feature request
+description: Suggest an idea or experiment
+labels: [enhancement]
+body:
+  - type: textarea
+    id: idea
+    attributes: { label: Idea / hypothesis }
+  - type: textarea
+    id: metrics
+    attributes: { label: Success metric (Sharpe/MaxDD/etc.) }
