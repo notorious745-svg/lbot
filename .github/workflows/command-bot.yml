@@ -2,16 +2,16 @@ name: Command Bot
 on:
   issue_comment:
     types: [created, edited]
-
+  pull_request_review_comment:
+    types: [created, edited]
 permissions:
   contents: write
   pull-requests: write
   issues: read
-
 jobs:
   bot:
-    if: startsWith(github.event.comment.body, '/bot ')
-    runs-on: ubuntu-latest
+    if: contains(github.event.comment.body, '/bot ')
+    runs-on: self-hosted
     steps:
       - uses: actions/checkout@v4
         with: { fetch-depth: 0 }

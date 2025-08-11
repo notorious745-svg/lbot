@@ -64,10 +64,10 @@ def evaluate(model):
     while not done:
         act, _ = model.predict(obs, deterministic=True)
         step_out = env.step(_to_int_action(act))
-        if len(step_out) == 5:   # Gymnasium: (obs, reward, terminated, truncated, info)
+        if len(step_out) == 5:   # Gymnasium
             obs, reward, terminated, truncated, info = step_out
             done = bool(terminated or truncated)
-        else:                    # Gym: (obs, reward, done, info)
+        else:                    # Gym
             obs, reward, done, info = step_out
         equity.append(env.equity if hasattr(env, "equity") else env.balance)
 
@@ -84,10 +84,8 @@ def evaluate(model):
         gross_loss = -trades[trades < 0].sum() if losses else 0.0
         pf = (gross_win / max(gross_loss, 1e-12)) if losses else float("inf")
         expectancy = trades.mean()
-        print(
-            f"Trades: {n} | Win%: {win_rate:.2%} | PF: {pf:.2f} | "
-            f"Expectancy: {expectancy:.2f} | AvgWin: {avg_win:.2f} | AvgLoss: {avg_loss:.2f}"
-        )
+        print(f"Trades: {n} | Win%: {win_rate:.2%} | PF: {pf:.2f} | "
+              f"Expectancy: {expectancy:.2f} | AvgWin: {avg_win:.2f} | AvgLoss: {avg_loss:.2f}")
     else:
         print("Trades: 0")
 

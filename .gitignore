@@ -1,18 +1,11 @@
-# Python
-__pycache__/
-*.pyc
-.venv/
-.ipynb_checkpoints/
-
-# Logs / TensorBoard
-logs/
-ppo_tb/
-
-# Data/Models
 data/
 models/
+logs/
+ppo_tb/
+.venv/
+__pycache__/
+*.csv
+*.pkl
 *.zip
-
-# OS
-.DS_Store
-Thumbs.db
+backtests/out.txt
+metrics.txt
