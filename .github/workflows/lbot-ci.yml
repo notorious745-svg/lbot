@@ -44,22 +44,22 @@ jobs:
       - name: Parse metrics
         run: python backtests/print_metrics.py backtests/out.txt > metrics.txt
 
-            - name: Enforce gate
-  run: python backtests/enforce_gate.py --maxdd $MAX_DD --min_sharpe $MIN_SHARPE metrics.txt
+      - name: Enforce gate
+        run: python backtests/enforce_gate.py --maxdd $MAX_DD --min_sharpe $MIN_SHARPE metrics.txt
 
-- name: Upload out.txt
-  if: always()
-  uses: actions/upload-artifact@v4
-  with:
-    name: backtest-out
-    path: backtests/out.txt
-    retention-days: 14
+      # upload แยกสองไฟล์ (กันปัญหา multiline)
+      - name: Upload out.txt
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backtest-out
+          path: backtests/out.txt
+          retention-days: 14
 
-- name: Upload metrics.txt
-  if: always()
-  uses: actions/upload-artifact@v4
-  with:
-    name: metrics
-    path: metrics.txt
-    retention-days: 14
-
+      - name: Upload metrics.txt
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: metrics
+          path: metrics.txt
+          retention-days: 14
