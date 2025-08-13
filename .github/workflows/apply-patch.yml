@@ -1,0 +1,59 @@
+name: Apply patch from comment
+
+on:
+  issue_comment:
+    types: [created, edited]
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: read
+
+jobs:
+  apply-patch:
+    if: startsWith(github.event.comment.body, '/apply-patch')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout default branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 0
+
+      - name: Extract patch from comment
+        run: |
+          python - <<'PY'
+          import os, re, sys
+          body = os.environ['BODY']
+          m = re.search(r"```(?:patch|diff)\n([\s\S]*?)\n```", body)
+          if not m:
+              print("::error::No ```patch``` or ```diff``` code block found in the comment.")
+              sys.exit(1)
+          open('patch.diff','w',encoding='utf-8').write(m.group(1))
+          print("Saved patch.diff")
+          PY
+        env:
+          BODY: ${{ github.event.comment.body }}
+
+      - name: Apply patch
+        run: |
+          set -e
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          BR="patch-${{ github.event.issue.number }}-${{ github.run_id }}"
+          git checkout -b "$BR"
+          git apply --whitespace=fix --reject -v patch.diff
+          git add -A
+          git commit -m "Apply patch from comment by @${{ github.event.comment.user.login }}"
+          git push --set-upstream origin "$BR"
+
+      - name: Open PR
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          BASE="${{ github.event.repository.default_branch }}"
+          HEAD="$(git rev-parse --abbrev-ref HEAD)"
+          gh pr create \
+            --title "Apply patch from comment by @${{ github.event.comment.user.login }}" \
+            --body  "Auto-generated from https://github.com/${{ github.repository }}/issues/${{ github.event.issue.number }}" \
+            --base "$BASE" --head "$HEAD"
