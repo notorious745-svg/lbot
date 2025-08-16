@@ -1,1 +1,44 @@
-﻿
+﻿name: L-Bot Quality Gate
+on:
+  workflow_dispatch:
+    inputs:
+      minutes:
+        description: "Lookback minutes"
+        default: "5000"
+      min_sharpe:
+        description: "Min Sharpe"
+        default: "1.20"
+      maxdd:
+        description: "Max drawdown"
+        default: "0.25"
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install numpy pandas
+      - name: Run backtest
+        run: |
+          python backtests/run_quick_backtest.py --minutes ${{ github.event.inputs.minutes }} --symbol XAUUSD > backtests/out.txt
+      - name: Parse metrics
+        run: |
+          python backtests/print_metrics.py backtests/out.txt > metrics.txt
+          cat metrics.txt
+      - name: Enforce strict gate
+        run: |
+          python backtests/enforce_gate.py --min_sharpe ${{ github.event.inputs.min_sharpe }} --maxdd ${{ github.event.inputs.maxdd }} metrics.txt
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: metrics
+          path: |
+            backtests/out.txt
+            metrics.txt
