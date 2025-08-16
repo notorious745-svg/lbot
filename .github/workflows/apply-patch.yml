@@ -1,54 +1,53 @@
-name: Apply patch v3
+name: Apply patch v3.1
 on:
   issue_comment:
     types: [created]
 
 permissions:
-  contents: write           # ให้สิทธิ์ push
-  pull-requests: write      # ให้สิทธิ์เปิด PR
+  contents: write
+  pull-requests: write
 
 jobs:
   apply:
     if: contains(github.event.comment.body, '/apply-patch')
     runs-on: ubuntu-latest
+    env:
+      GIT_TRACE: 1
+      GIT_CURL_VERBOSE: 1
     steps:
-      - name: Checkout (full) with token
+      - name: Checkout (full)
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
           persist-credentials: true
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Show git info (debug)
+      - name: Debug git
         run: |
           git --version
           git remote -v
           git status
-          echo "Actor=${{ github.actor }}"
-          echo "Ref=${{ github.ref }}"
-          echo "SHA=${{ github.sha }}"
+          echo "Repo=${{ github.repository }}  Actor=${{ github.actor }}  Ref=${{ github.ref }}"
 
-      - name: Extract patch from comment (robust)
+      - name: Extract patch (robust)
         id: extract
         uses: actions/github-script@v7
         with:
           script: |
             const body = context.payload.comment.body || '';
-            // 1) ```patch / ```diff
             let m = body.match(/^[>\s]*```(?:patch|diff)\s*\r?\n([\s\S]*?)\r?\n[>\s]*```/im);
-            // 2) fallback: any fenced code block
             if (!m) m = body.match(/^[>\s]*```\s*\r?\n([\s\S]*?)\r?\n[>\s]*```/im);
             if (!m) core.setFailed('No fenced code block found in the comment.');
             else core.setOutput('patch', m[1]);
 
-      - name: Save patch file
+      - name: Save patch
         run: |
           printf "%s" "${{ steps.extract.outputs.patch }}" > change.patch
-          echo "----- patch preview (first 30 lines) -----"
+          echo "---- patch preview ----"
           head -n 30 change.patch || true
 
       - name: Create work branch
-        id: mkbranch
+        id: mk
         run: |
           BR="patch/apply-${{ github.run_id }}"
           git switch -c "$BR"
@@ -58,18 +57,21 @@ jobs:
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          # อดทน whitespace และ path
           git apply -p0 --whitespace=nowarn change.patch
           git add -A
           if git diff --cached --quiet; then
-            echo "No changes to commit (patch empty)."
-            exit 0
-          fi
+            echo "No changes to commit"; exit 0; fi
           git commit -m "apply-patch from issue #${{ github.event.issue.number }} by @${{ github.actor }}"
 
-      - name: Push branch
+      - name: Ensure remote uses token (important)
         run: |
-          git push origin "${{ steps.mkbranch.outputs.branch }}"
+          git remote set-url origin \
+            https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git
+          git remote -v
+
+      - name: Push branch (verbose)
+        run: |
+          git push -vvv origin "${{ steps.mk.outputs.branch }}"
 
       - name: Open PR
         env:
@@ -77,6 +79,6 @@ jobs:
         run: |
           gh pr create \
             --base main \
-            --head "${{ steps.mkbranch.outputs.branch }}" \
+            --head "${{ steps.mk.outputs.branch }}" \
             --title "Apply patch from issue #${{ github.event.issue.number }}" \
             --body "Created by workflow. Actor: @${{ github.actor }}."
