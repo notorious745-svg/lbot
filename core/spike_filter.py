@@ -1,8 +1,9 @@
 from __future__ import annotations
 import pandas as pd
-from indicators import atr
+from core.indicators import atr
 
-def spike_flag(df: pd.DataFrame, n_atr: int = 14, k: float = 3.0) -> pd.Series:
-    a = atr(df, n_atr)
+def spike_flag(df: pd.DataFrame, n: int = 14, k: float = 3.0) -> pd.Series:
+    """ธง spike = 1 เมื่อช่วง high-low ใหญ่กว่า k*ATR; ใช้ปิดสัญญาณชั่วคราว"""
     rng = (df["high"] - df["low"]).abs()
-    return (rng > k * a.shift(1)).astype(int)  # ใช้ ATR ของแท่งก่อนหน้าเป็นเกณฑ์
+    a = atr(df, n=n)
+    return ((rng > (k * a)).astype(int)).reindex(df.index).fillna(0)
