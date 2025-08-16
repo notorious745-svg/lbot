@@ -1,5 +1,13 @@
 # backtests/run_quick_backtest.py
 from __future__ import annotations
+# --- make sibling package ('core') importable even when running as a script ---
+import sys
+from pathlib import Path
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+# -----------------------------------------------------------------------------
+
 import argparse, numpy as np, pandas as pd
 from datetime import timedelta
 from core.data_loader import load_price_csv
@@ -22,7 +30,6 @@ if __name__ == "__main__":
     p = argparse.ArgumentParser()
     p.add_argument("--minutes", type=int, default=None)
     p.add_argument("--symbol", type=str, default="XAUUSD")
-    # พารามิเตอร์พื้นฐาน (จูนได้ภายหลัง)
     p.add_argument("--atr_n", type=int, default=14)
     p.add_argument("--atr_mult", type=float, default=2.5)
     p.add_argument("--pyr_step_atr", type=float, default=1.0)
@@ -45,10 +52,9 @@ if __name__ == "__main__":
     )
 
     out = pd.DataFrame(index=df.index)
-    out["pos"] = pos.shift(1).fillna(0)  # ถือครองในบาร์ถัดไป
+    out["pos"] = pos.shift(1).fillna(0)
     out["ret"] = df["close"].pct_change().fillna(0.0)
     out["pnl_gross"] = out["pos"] * out["ret"]
-
     turns = out["pos"].diff().abs().fillna(0)
     fee = (TAKER_FEE_BPS_PER_SIDE/10000.0) * 2.0
     out["pnl_net"] = out["pnl_gross"] - (turns > 0).astype(int) * fee
