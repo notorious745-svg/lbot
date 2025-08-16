@@ -1,49 +1,89 @@
-name: Apply patch v2
+name: Apply patch v3
 on:
   issue_comment:
     types: [created]
+
 permissions:
   contents: write
   pull-requests: read
 
 jobs:
   apply:
-    # ต้องมี /apply-patch ในคอมเมนต์
     if: contains(github.event.comment.body, '/apply-patch')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Extract patch from comment
+      - name: Extract patch from the comment (robust)
         id: extract
         uses: actions/github-script@v7
         with:
           script: |
-            const body = context.payload.comment.body;
+            const body = context.payload.comment.body || '';
 
-            // 1) พยายามจับ ```patch / ```diff ก่อน
-            let m = body.match(/```(?:patch|diff)\r?\n([\s\S]*?)\r?\n```/m);
+            // helper: try a list of patterns
+            const tryMatch = (reList) => {
+              for (const re of reList) {
+                const m = body.match(re);
+                if (m && m[1]) return m[1];
+              }
+              return null;
+            };
 
-            // 2) ถ้าไม่เจอ ให้รับ code block ธรรมดาก็ได้
-            if (!m) m = body.match(/```\r?\n([\s\S]*?)\r?\n```/m);
+            // 1) fenced code block: ```patch / ```diff (allow spaces/quotes before ```; allow CRLF)
+            const fencedPatch = tryMatch([
+              /^[>\s]*```(?:patch|diff)\s*\r?\n([\s\S]*?)\r?\n[>\s]*```/im,
+              // 2) any fenced code block (no language)
+              /^[>\s]*```\s*\r?\n([\s\S]*?)\r?\n[>\s]*```/im,
+            ]);
 
-            if (!m) {
-              core.setFailed('No fenced code block found in the comment.');
+            // 3) base64 patch block
+            const base64Block = (()=>{
+              const m = body.match(/^[>\s]*```base64patch\s*\r?\n([\s\S]*?)\r?\n[>\s]*```/im);
+              if (!m) return null;
+              try {
+                return Buffer.from(m[1].trim(), 'base64').toString('utf8');
+              } catch (e) { return null; }
+            })();
+
+            // 4) raw URL to .patch/.diff/.txt
+            const urlMatch = body.match(/https?:\/\/\S+\.(?:patch|diff|txt)(?:\?\S+)?/i);
+            const url = urlMatch ? urlMatch[0] : null;
+
+            if (fencedPatch) {
+              core.setOutput('mode', 'fenced');
+              core.setOutput('patch', fencedPatch);
+            } else if (base64Block) {
+              core.setOutput('mode', 'base64');
+              core.setOutput('patch', base64Block);
+            } else if (url) {
+              core.setOutput('mode', 'url');
+              core.setOutput('url', url);
             } else {
-              core.setOutput('patch', m[1]);
+              core.setFailed('No patch found. Please provide a fenced code block, a base64 block, or a .patch/.diff URL.');
             }
 
-      - name: Save patch file
+      - name: Save patch to file
+        if: steps.extract.outputs.mode == 'fenced' || steps.extract.outputs.mode == 'base64'
         run: |
           printf "%s" "${{ steps.extract.outputs.patch }}" > change.patch
-          echo "----- preview -----"
+          echo "------ preview -----"
+          head -n 30 change.patch || true
+
+      - name: Download patch from URL
+        if: steps.extract.outputs.mode == 'url'
+        run: |
+          curl -L "${{ steps.extract.outputs.url }}" -o change.patch
+          echo "Downloaded from URL: ${{ steps.extract.outputs.url }}"
+          echo "------ preview -----"
           head -n 30 change.patch || true
 
       - name: Apply patch
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git apply -p0 change.patch
+          # -p0: allow paths without a/ b/, be forgiving with whitespace
+          git apply -p0 --whitespace=nowarn change.patch
 
       - name: Commit & push
         run: |
