@@ -1,21 +1,31 @@
-import sys, argparse, re
+from __future__ import annotations
+import argparse, sys, re
 
-p = argparse.ArgumentParser()
-p.add_argument('file', type=str)
-p.add_argument('--min_sharpe', type=float, default=1.2)
-p.add_argument('--maxdd', type=float, default=0.25)
-args = p.parse_args()
+def read_metrics(path: str):
+    with open(path, "r", encoding="utf-8") as f:
+        txt = f.read()
+    def pick(key, default):
+        m = re.search(rf"{key}\s*=\s*([\-+]?\d+(\.\d+)?)", txt, flags=re.IGNORECASE)
+        return float(m.group(1)) if m else default
+    return {
+        "sharpe": pick("sharpe", 0.0),
+        "maxdd":  pick("maxdd", 1.0),
+        "trades": int(pick("trades", 0.0)),
+    }
 
-text = open(args.file, 'r', encoding='utf-8').read()
-def g(key, default):
-    m = re.search(rf"{key}=([\d\.]+)", text)
-    return float(m.group(1)) if m else default
+if __name__ == "__main__":
+    ap = argparse.ArgumentParser()
+    ap.add_argument("metrics_file")
+    ap.add_argument("--min_sharpe", type=float, required=True)
+    ap.add_argument("--maxdd", type=float, required=True)
+    args = ap.parse_args()
 
-sharpe = g("Sharpe", 0)
-maxdd  = g("MaxDD", 1.0)
+    m = read_metrics(args.metrics_file)
+    ok = True
+    if m["sharpe"] < args.min_sharpe:
+        print(f"FAIL: sharpe {m['sharpe']:.4f} < min {args.min_sharpe:.4f}"); ok = False
+    if m["maxdd"] > args.maxdd:
+        print(f"FAIL: maxdd {m['maxdd']:.4f} > max {args.maxdd:.4f}"); ok = False
 
-print(f"[gate] Sharpe={sharpe} (min {args.min_sharpe}), MaxDD={maxdd} (max {args.maxdd})")
-if sharpe < args.min_sharpe or maxdd > args.maxdd:
-    print("::error::Gate failed")
-    sys.exit(1)
-print("::notice::Gate passed")
+    print(f"RESULT: sharpe={m['sharpe']:.4f} maxdd={m['maxdd']:.4f} trades={m['trades']}")
+    sys.exit(0 if ok else 1)
