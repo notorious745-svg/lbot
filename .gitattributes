@@ -1,9 +1,25 @@
-@"
-* text=auto
+# normalize line endings
+* text=auto eol=lf
+
+# windows scripts
+*.bat text eol=crlf
+*.ps1 text eol=crlf
+
+# unix scripts
+*.sh  text eol=lf
+
+# code / docs we want LF
 *.py   text eol=lf
 *.yml  text eol=lf
 *.yaml text eol=lf
-*.sh   text eol=lf
-*.bat  text eol=crlf
-*.ps1  text eol=crlf
-"@ | Set-Content -Encoding ascii .gitattributes
+*.md   text eol=lf
+*.csv  text eol=lf
+
+# binaries
+*.png  -text
+*.jpg  -text
+*.jpeg -text
+*.gif  -text
+*.ico  -text
+*.zip  -text
+*.pkl  -text
