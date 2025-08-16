@@ -1,39 +1,46 @@
-# core/entries.py
 from __future__ import annotations
-from typing import Dict, Literal
+import pandas as pd
+from indicators import ema, bbands
+from spike_filter import spike_flag
 
-Signal = Literal[0, 1, 2]  # 0=hold, 1=open/add long, 2=exit-all (ใช้ในอนาคต)
+# --- สัญญาณแต่ละกลยุทธ์ (close-only) ---
+def sig_ema(df: pd.DataFrame) -> pd.Series:
+    e10, e20, e50 = ema(df["close"], 10), ema(df["close"], 20), ema(df["close"], 50)
+    # สัญญาณ +1 เมื่อ e10>e20>e50, -1 เมื่อ e10<e20<e50, 0 อื่น ๆ
+    long  = (e10 > e20) & (e20 > e50)
+    short = (e10 < e20) & (e20 < e50)
+    s = pd.Series(0, index=df.index)
+    s[long]  = 1
+    s[short] = -1
+    return s
 
-def ema_trend_long(row: Dict[str, float]) -> bool:
-    """
-    ใช้ EMA50 เหนือ EMA200 + close เหนือ EMA50 = แนวโน้มขาขึ้น
-    """
-    return (
-        row.get("ema_fast", 0.0) > row.get("ema_slow", 0.0)
-        and row.get("close", 0.0) > row.get("ema_fast", 0.0)
-    )
+def _turtle_channel(series: pd.Series, n: int):
+    hh = series.rolling(n, min_periods=n).max()
+    ll = series.rolling(n, min_periods=n).min()
+    return hh, ll
 
-def spike_filter(row: Dict[str, float], k: float) -> bool:
-    """
-    true = เป็น spike (ควรหลีกเลี่ยง)
-    วัดจาก body/ATR > k
-    """
-    atr = max(row.get("atr", 1e-9), 1e-9)
-    body = abs(row.get("close", 0.0) - row.get("open", 0.0))
-    return (body / atr) > k
+def sig_turtle(df: pd.DataFrame, n: int) -> pd.Series:
+    hh, ll = _turtle_channel(df["close"], n)
+    s = pd.Series(0, index=df.index)
+    s[df["close"] > hh.shift(1)] = 1
+    s[df["close"] < ll.shift(1)] = -1
+    return s
 
-def decide_entry(
-    row: Dict[str, float],
-    *,
-    bar_close_only: bool = True,
-    use_spike: bool = True,
-    spike_k: float = 2.2,
-) -> Signal:
-    """
-    return: 0=hold, 1=open/add long
-    """
-    if use_spike and spike_filter(row, spike_k):
-        return 0
-    if bar_close_only and not row.get("bar_closed", True):
-        return 0
-    return 1 if ema_trend_long(row) else 0
+def sig_meanrev(df: pd.DataFrame) -> pd.Series:
+    up, low, ma = bbands(df["close"], n=20, k=2.0)
+    s = pd.Series(0, index=df.index)
+    # แตะ upper → คาด mean reversion ลง = -1, แตะ lower → +1
+    s[df["close"] > up]  = -1
+    s[df["close"] < low] = 1
+    return s
+
+# --- รวมสัญญาณ + spike filter ---
+def combined_signal(df: pd.DataFrame) -> pd.DataFrame:
+    out = pd.DataFrame(index=df.index)
+    out["ema"]     = sig_ema(df)
+    out["turtle20"]= sig_turtle(df, 20)
+    out["turtle55"]= sig_turtle(df, 55)
+    out["meanrev"] = sig_meanrev(df)
+    out["spike"]   = spike_flag(df)  # 1=spike, ให้หลีกเลี่ยงเข้าไม้
+    # เข้าเฉพาะตอนแท่งปิด: สัญญาณมีค่า ณ แท่งนั้น แต่ execute แท่งถัดไปได้ตาม engine
+    return out
