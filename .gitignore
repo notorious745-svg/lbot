@@ -1,11 +1,7 @@
-data/
-models/
-logs/
-ppo_tb/
-.venv/
-__pycache__/
+# data & artifacts
 *.csv
+/data/
+/**/data/
 *.pkl
-*.zip
-backtests/out.txt
-metrics.txt
+*.pt
+*.onnx
