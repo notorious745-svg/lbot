@@ -1,35 +1,35 @@
-from __future__ import annotations
+# config.py
 import os
 from dataclasses import dataclass
 
-# --------- Symbol / timeframe ----------
-SYMBOL = "XAUUSD"
-TIMEFRAME_MINUTES = 15  # เราทำงานบน M15 เท่านั้น
+# ชี้ไฟล์ข้อมูล: ใช้ ENV ก่อน ถ้าไม่ตั้งจะ fallback ค่า default ด้านล่าง
+DATA_FILE = os.getenv(
+    "LBOT_DATA_FILE",
+    # เปลี่ยนเป็นไฟล์ที่คุณมี หรือปล่อยไว้ก่อนก็ได้
+    "data/xauusd_15m_clean.csv",
+)
 
-# --------- Paths ----------
-# ใช้ตัวแปรแวดล้อมถ้ามี ไม่งั้น fallback เป็นโฟลเดอร์ data ใน repo
-DATA_DIR = os.environ.get("LBOT_DATA_DIR", os.path.join(os.path.dirname(__file__), "data"))
-DATA_FILE = os.path.join(DATA_DIR, f"{SYMBOL}_15m_clean.csv")  # ชื่อไฟล์มาตรฐาน
-
-# --------- Risk guard (manual mode ดีฟอลต์) ----------
-RISK_PER_TRADE = 0.005        # 0.5%/trade
-DAILY_RISK_CAP = 0.02         # 2%/day
-MAX_OPEN_POSITIONS_TOTAL = 3  # รวมทุกกลยุทธ์
-MAX_OPEN_POSITIONS_PER_STRAT = 3
-
-# --------- Filters ----------
-SPIKE_ATR_MULT = 3.0          # ถ้า range > 3*ATR14 → skip สัญญาณ
+# ===== Risk / Trade params (ปรับตามสบาย) =====
+BAR_CLOSE_ONLY = True          # ตัดสินใจตอนแท่งปิด
+RISK_PER_TRADE = 0.005         # 0.5% ของ equity ต่อไม้
+DAILY_RISK_CAP = 0.02          # max risk ต่อวัน
+MAX_PYRAMID = 3                # จำนวนไม้เพิ่มสูงสุดเมื่อวิ่งทางกำไร
+ADD_ON_GAIN_R_MULT = 0.8       # เพิ่มไม้เมื่อกำไร >= 0.8R
+BREAKEVEN_AFTER_R_MULT = 1.0   # ย้าย SL ไป BE เมื่อกำไรถึง 1R
 ATR_PERIOD = 14
+ATR_TRAIL_MULT = 2.0
 
-# --------- Entries / Exits ----------
-EMA_FAST = 10
-EMA_SLOW = 20
-EMA_TREND = 50
+# ===== Session / Filter (ใช้หรือไม่ใช้ก็ได้) =====
+USE_SPIKE_FILTER = True
+SPIKE_MULT = 2.2                # body > ATR*k -> ถือว่า spike
 
-# trailing/exit hook (สำหรับต่อ ML ภายหลัง)
-ATR_TRAIL_MULT = 3.0
-BREAKEVEN_AFTER_R_MULT = 1.0  # ย้าย SL เป็น BE เมื่อวิ่งได้ 1R
+# ===== Backtest =====
+START_BALANCE = 10_000.0
+SLIPPAGE = 0.0
+COMMISSION_PER_TRADE = 0.0
 
-# --------- Misc ----------
-SEED = 2025
-BAR_CLOSE_ONLY = True  # เข้าสัญญาณเฉพาะตอนแท่งปิด (M15)
+@dataclass
+class Symbols:
+    name: str = "XAUUSD"
+    pip: float = 0.01          # ใช้คำนวณ R/ATR sizing
+SYMBOL = Symbols()
