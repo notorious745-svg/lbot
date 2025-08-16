@@ -1,89 +1,113 @@
+# core/runner.py
 from __future__ import annotations
-import os
 import pandas as pd
 import numpy as np
-from datetime import datetime
+from pathlib import Path
+
 import config
-from features import build_features
-from entries import decide_entry
-from position_manager import PositionManager
+from core.entries import decide_entry
+from core.position_manager import PMConfig, PositionManager
 
 def load_data(path: str) -> pd.DataFrame:
-    if not os.path.exists(path):
-        raise FileNotFoundError(f"DATA not found: {path}")
-    df = pd.read_csv(path)
-    # คาดหวังคอลัมน์: time, open, high, low, close, volume
+    f = Path(path)
+    if not f.exists():
+        raise FileNotFoundError(f"DATA not found: {f!s}")
+    df = pd.read_csv(f)
+    # columns: time,open,high,low,close,volume
     df["time"] = pd.to_datetime(df["time"])
+    df = df.sort_values("time").reset_index(drop=True)
     return df
 
-def run_backtest_simple():
-    df_raw = load_data(config.DATA_FILE)
-    df, meta = build_features(df_raw)
+def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
+    ema_fast = df["close"].ewm(span=50, adjust=False).mean()
+    ema_slow = df["close"].ewm(span=200, adjust=False).mean()
+    tr = np.maximum(df["high"] - df["low"],
+                    np.maximum((df["high"] - df["close"].shift()).abs(),
+                               (df["low"] - df["close"].shift()).abs()))
+    atr = tr.ewm(span=config.ATR_PERIOD, adjust=False).mean()
+    df = df.assign(
+        ema_fast=ema_fast,
+        ema_slow=ema_slow,
+        atr=atr,
+        bar_closed=True  # backtest ปกติใช้ตอนแท่งปิด
+    )
+    return df.dropna().reset_index(drop=True)
 
-    pm = PositionManager(contract_size=1.0)
-    cash = 10_000.0
-    equity_hist = [cash]
-    day = None
+def backtest(df: pd.DataFrame):
+    pm = PositionManager(
+        PMConfig(
+            risk_per_trade=config.RISK_PER_TRADE,
+            daily_risk_cap=config.DAILY_RISK_CAP,
+            max_pyramid=config.MAX_PYRAMID,
+            add_on_gain_r=config.ADD_ON_GAIN_R_MULT,
+            breakeven_after_r=config.BREAKEVEN_AFTER_R_MULT,
+            atr_mult=config.ATR_TRAIL_MULT,
+            pip=0.01,
+        ),
+        equity=config.START_BALANCE,
+    )
+    balance = config.START_BALANCE
+    equity_curve = []
 
-    # เริ่มหลังอินดิเคเตอร์อุ่นตัว
-    start = max(50, config.ATR_PERIOD + 1)
-    for i in range(start, len(df)):
-        row = df.iloc[i]
-        day_now = row["time"].date()
-        if day != day_now:
-            day = day_now
-            pm.new_day(equity_hist[-1], day)
+    last_date = None
+    daily_risk_reset = False
 
-        # on-close logic
-        obs = {
-            "close": float(row["close"]),
-            "ema_fast": float(row["ema_fast"]),
-            "ema_slow": float(row["ema_slow"]),
-            "ema_trend": float(row["ema_trend"]),
-            "rsi14": float(row["rsi14"]) if not np.isnan(row["rsi14"]) else 50.0,
-            "atr14": float(row["atr14"]) if not np.isnan(row["atr14"]) else 0.0,
-            "is_spike": bool(row["is_spike"]),
-        }
+    for i, row in df.iterrows():
+        # reset daily risk
+        d = row["time"].date()
+        if last_date is None or d != last_date:
+            pm.day_risk_used = 0.0
+            daily_risk_reset = True
+        last_date = d
 
-        action = 0
-        if obs["is_spike"]:
-            action = 0
-        else:
-            action = decide_entry(obs, bar_close_only=config.BAR_CLOSE_ONLY)
-            # daily risk cap guard
-            if pm.daily_risk_used >= config.DAILY_RISK_CAP * equity_hist[-1]:
-                action = 0
+        price = float(row["close"])
+        atr = float(row["atr"])
+        low = float(row["low"])
 
-        # execute
-        step_pnl = 0.0
-        if action == 1:
-            if pm.can_add_long(obs["close"]):
-                pm.open_or_add_long(obs["close"], obs["atr14"], equity_hist[-1])
-        elif action == 2:
-            step_pnl += pm.flat(obs["close"])
+        # 1) exit by SL
+        if pm.positions and pm.stop_out(low):
+            balance += pm.exit_all(price)
 
-        # trailing & breakeven (ย่อ) — รักษาให้สอดคล้องกับ env
-        if pm.state.side == +1 and pm.state.qty > 0:
-            atr = obs["atr14"]
-            # breakeven after 1R
-            R = (obs["close"] - pm.state.entry) / max(atr, 1e-4)
-            if R >= config.BREAKEVEN_AFTER_R_MULT:
-                pm.state.sl = max(pm.state.sl or pm.state.entry, pm.state.entry)
-            trail = obs["close"] - config.ATR_TRAIL_MULT * atr
-            pm.state.sl = trail if pm.state.sl is None else max(pm.state.sl, trail)
-            if obs["close"] <= (pm.state.sl or -1e9):
-                step_pnl += pm.flat(pm.state.sl)
+        # 2) manage trailing/breakeven
+        if pm.positions:
+            pm.update_sl(price, atr)
 
-        mtm = pm.mtm(obs["close"])
-        equity = cash + step_pnl + mtm
-        cash += step_pnl
-        equity_hist.append(equity)
+        # 3) decide entry
+        sig = decide_entry(
+            {
+                "open": float(row["open"]),
+                "close": price,
+                "ema_fast": float(row["ema_fast"]),
+                "ema_slow": float(row["ema_slow"]),
+                "atr": atr,
+                "bar_closed": True,
+            },
+            bar_close_only=config.BAR_CLOSE_ONLY,
+            use_spike=config.USE_SPIKE_FILTER,
+            spike_k=config.SPIKE_MULT,
+        )
+        if sig == 1:
+            pm.try_open_or_add(price, atr)
 
-    # สรุปผลคร่าว ๆ
-    eq = np.array(equity_hist, dtype=float)
-    ret = np.diff(eq) / np.maximum(eq[:-1], 1e-6)
-    sharpe = (ret.mean() / (ret.std() + 1e-12)) * np.sqrt(252*24*4)  # ประมาณคร่าว ๆ สำหรับ M15
-    print(f"Equity final: {eq[-1]:.2f} | Sharpe~ {sharpe:.2f} | Steps: {len(eq)}")
+        # mark-to-market
+        eq = balance + pm.unrealized(price)
+        equity_curve.append(eq)
+
+    # ปิดสุดท้ายถ้ายังมี position
+    if pm.positions:
+        balance += pm.exit_all(df.iloc[-1]["close"])
+
+    equity_curve[-1] = balance
+    return balance, pd.Series(equity_curve, index=df["time"])
+
+def main():
+    df = load_data(config.DATA_FILE)
+    df = add_indicators(df)
+    final_bal, curve = backtest(df)
+
+    ret = curve.pct_change().fillna(0.0)
+    sharpe = 0.0 if ret.std() == 0 else (ret.mean() / ret.std()) * (np.sqrt(365*24*4))  # scale ~M15
+    print(f"Equity final: {final_bal:,.2f} | Sharpe~ {sharpe:.2f} | Steps: {len(curve):,}")
 
 if __name__ == "__main__":
-    run_backtest_simple()
+    main()
