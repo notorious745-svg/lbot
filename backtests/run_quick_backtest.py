@@ -1,12 +1,11 @@
-# backtests/run_quick_backtest.py
 from __future__ import annotations
-# --- make sibling package ('core') importable even when running as a script ---
+# --- allow importing 'core' when run as a script from backtests/ ---
 import sys
 from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
-# -----------------------------------------------------------------------------
+# ------------------------------------------------------------------
 
 import argparse, numpy as np, pandas as pd
 from datetime import timedelta
