@@ -1,59 +1,52 @@
-name: Apply patch from comment
-
+name: Apply patch v2
 on:
   issue_comment:
-    types: [created, edited]
-
+    types: [created]
 permissions:
   contents: write
-  pull-requests: write
-  issues: read
+  pull-requests: read
 
 jobs:
-  apply-patch:
-    if: startsWith(github.event.comment.body, '/apply-patch')
+  apply:
+    # ต้องมี /apply-patch ในคอมเมนต์
+    if: contains(github.event.comment.body, '/apply-patch')
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout default branch
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.repository.default_branch }}
-          fetch-depth: 0
+      - uses: actions/checkout@v4
 
       - name: Extract patch from comment
+        id: extract
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const body = context.payload.comment.body;
+
+            // 1) พยายามจับ ```patch / ```diff ก่อน
+            let m = body.match(/```(?:patch|diff)\r?\n([\s\S]*?)\r?\n```/m);
+
+            // 2) ถ้าไม่เจอ ให้รับ code block ธรรมดาก็ได้
+            if (!m) m = body.match(/```\r?\n([\s\S]*?)\r?\n```/m);
+
+            if (!m) {
+              core.setFailed('No fenced code block found in the comment.');
+            } else {
+              core.setOutput('patch', m[1]);
+            }
+
+      - name: Save patch file
         run: |
-          python - <<'PY'
-          import os, re, sys
-          body = os.environ['BODY']
-          m = re.search(r"```(?:patch|diff)\n([\s\S]*?)\n```", body)
-          if not m:
-              print("::error::No ```patch``` or ```diff``` code block found in the comment.")
-              sys.exit(1)
-          open('patch.diff','w',encoding='utf-8').write(m.group(1))
-          print("Saved patch.diff")
-          PY
-        env:
-          BODY: ${{ github.event.comment.body }}
+          printf "%s" "${{ steps.extract.outputs.patch }}" > change.patch
+          echo "----- preview -----"
+          head -n 30 change.patch || true
 
       - name: Apply patch
         run: |
-          set -e
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          BR="patch-${{ github.event.issue.number }}-${{ github.run_id }}"
-          git checkout -b "$BR"
-          git apply --whitespace=fix --reject -v patch.diff
-          git add -A
-          git commit -m "Apply patch from comment by @${{ github.event.comment.user.login }}"
-          git push --set-upstream origin "$BR"
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git apply -p0 change.patch
 
-      - name: Open PR
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Commit & push
         run: |
-          BASE="${{ github.event.repository.default_branch }}"
-          HEAD="$(git rev-parse --abbrev-ref HEAD)"
-          gh pr create \
-            --title "Apply patch from comment by @${{ github.event.comment.user.login }}" \
-            --body  "Auto-generated from https://github.com/${{ github.repository }}/issues/${{ github.event.issue.number }}" \
-            --base "$BASE" --head "$HEAD"
+          git add -A
+          git commit -m "apply-patch from issue #${{ github.event.issue.number }} by @${{ github.actor }}"
+          git push
