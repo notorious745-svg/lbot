@@ -1,241 +1,166 @@
-# trading_env.py
-import gymnasium as gym
+from __future__ import annotations
 import numpy as np
 import pandas as pd
-from gymnasium import spaces
-import ta
+from dataclasses import dataclass
+from typing import Optional, Dict, Any, Tuple
 
-from utils import load_data
-from config import DATA_PATH, INITIAL_BALANCE, LOT_SIZE, MAX_STEPS
+import config
+from features import build_features
+from reward_fn import step_reward
 
-# ===== DEFAULT PARAMS (ถ้าไม่มีใน config.py ก็ใช้ค่าพวกนี้) =====
-ATR_PERIOD        = 14
-RISK_PCT_TRADE    = 0.005     # เสี่ยง 0.5% ของ equity ต่อไม้
-ATR_SL_MULT       = 2.0       # ระยะ SL = k * ATR
-ATR_TRAIL_MULT    = 1.0       # ระยะ trailing = k * ATR
-BE_AFTER_ATR      = 0.5       # กำไรถึง k*ATR → ขยับ SL มา breakeven
-UNITS_MIN         = 0.1
-UNITS_MAX         = 3.0
-SPIKE_ATR_MULT    = 1.2       # ถ้า |Δราคา| > k*ATR → ไม่เปิดไม้ใหม่
-SPREAD_COST       = 0.08      # ค่าประมาณ spread (USD/oz) ต่อ round-trip ต่อ 1 unit
-COMMISSION_PER_UNIT = 0.0     # ค่าคอมต่อ unit ต่อเทรด (ใส่ตามโบรกได้)
+@dataclass
+class Position:
+    side: int = 0      # 0=flat, +1=long, -1=short (เริ่มจาก long-only ได้)
+    entry: float = 0.0
+    qty: float = 0.0
+    sl: Optional[float] = None
+    tp: Optional[float] = None
+    group_id: Optional[int] = None  # ใช้เวลา pyramiding / exit พร้อมกัน
 
-def _safe(val, default):
-    try:
-        return float(val)
-    except Exception:
-        return default
-
-
-class TradingEnv(gym.Env):
+class TradingEnv:
     """
-    Actions: 0=Hold, 1=Long, 2=Short
-    Obs: ฟีเจอร์ตัวเลข (float32)
-    PnL/Reward: mark-to-market รายบาร์ + shaping ตอนจบ episode ผ่านสถิติ
-    Money Management: ขนาดไม้แปรตาม RISK_PCT_TRADE และ ATR
-    Exit: Breakeven & ATR trailing, ตรวจ SL ทุกบาร์ (soft stop)
+    Minimal on-close-bar environment สำหรับ XAUUSD M15
+    action space:
+      0 = hold, 1 = open/add long, 2 = exit all (flat)
     """
+    def __init__(self, df_raw: pd.DataFrame, start_cash: float = 10_000.0, contract_size: float = 1.0):
+        self.df_raw = df_raw.reset_index(drop=True)
+        self.data, self.meta = build_features(self.df_raw)
+        self.i = 0
+        self.pos = Position()
+        self.cash = float(start_cash)
+        self.equity_hist = [self.cash]
+        self.contract = float(contract_size)
+        self.daily_risk_used = 0.0
+        self.cur_day = None
+        # bookkeeping
+        self._open_groups = 0  # สำหรับจำลอง group/pyramid อย่างง่าย
 
-    metadata = {"render_modes": ["human"]}
+    def _price(self) -> float:
+        return float(self.data.loc[self.i, "close"])
 
-    def __init__(self):
-        super().__init__()
+    def _bar_date(self):
+        # รองรับทั้ง str / pandas.Timestamp
+        t = self.data.loc[self.i, "time"]
+        return pd.to_datetime(t).date()
 
-        raw = load_data(DATA_PATH)  # ต้องมี time, open, high, low, close, volume
-        if not np.issubdtype(raw["time"].dtype, np.datetime64):
-            raw["time"] = pd.to_datetime(raw["time"])
+    def _position_value(self, price: float) -> float:
+        return self.pos.qty * (price - self.pos.entry) * self.contract
 
-        # keep raw arrays for pricing/ATR/time
-        self._time = raw["time"].to_numpy()
-        self._close = raw["close"].to_numpy(dtype=float)
-        self._high = raw["high"].to_numpy(dtype=float)
-        self._low  = raw["low"].to_numpy(dtype=float)
+    def _risk_per_trade_value(self) -> float:
+        return self.equity_hist[-1] * config.RISK_PER_TRADE
 
-        # raw ATR for risk sizing & stops
-        raw_atr = ta.volatility.average_true_range(
-            high=raw["high"], low=raw["low"], close=raw["close"], window=ATR_PERIOD
-        )
-        self._atr = raw_atr.to_numpy(dtype=float)
+    def _daily_reset_if_needed(self):
+        d = self._bar_date()
+        if self.cur_day is None:
+            self.cur_day = d
+        elif d != self.cur_day:
+            self.cur_day = d
+            self.daily_risk_used = 0.0
 
-        # build features (numeric only) for observation
-        feat = raw.copy()
-        feat["ema10"]  = ta.trend.ema_indicator(feat["close"], window=10)
-        feat["ema25"]  = ta.trend.ema_indicator(feat["close"], window=25)
-        feat["ema50"]  = ta.trend.ema_indicator(feat["close"], window=50)
-        feat["rsi14"]  = ta.momentum.rsi(feat["close"], window=14)
-        feat["atr14"]  = raw_atr
-        feat["ch20_h"] = feat["high"].rolling(20).max()
-        feat["ch20_l"] = feat["low"].rolling(20).min()
-        feat["ch55_h"] = feat["high"].rolling(55).max()
-        feat["ch55_l"] = feat["low"].rolling(55).min()
-        feat = feat.dropna().reset_index(drop=True)
+    def reset(self) -> Dict[str, Any]:
+        self.i = max(50, config.ATR_PERIOD + 1)  # ให้ indicator อุ่นตัว
+        self.pos = Position()
+        self.cash = float(self.equity_hist[0])
+        self.equity_hist = [self.cash]
+        self.daily_risk_used = 0.0
+        self.cur_day = None
+        self._open_groups = 0
+        return self._obs()
 
-        # align raw arrays to features length (ตัดหัว NaN ออก)
-        cut = len(feat)
-        self._close = self._close[-cut:]
-        self._high  = self._high[-cut:]
-        self._low   = self._low[-cut:]
-        self._time  = self._time[-cut:]
-        self._atr   = self._atr[-cut:]
+    def _obs(self) -> Dict[str, Any]:
+        row = self.data.iloc[self.i]
+        return {
+            "close": float(row["close"]),
+            "ema_fast": float(row["ema_fast"]),
+            "ema_slow": float(row["ema_slow"]),
+            "ema_trend": float(row["ema_trend"]),
+            "rsi14": float(row["rsi14"]) if not np.isnan(row["rsi14"]) else 50.0,
+            "atr14": float(row["atr14"]) if not np.isnan(row["atr14"]) else 0.0,
+            "is_spike": bool(row["is_spike"]),
+            "trend_up": int(row["trend_up"]),
+        }
 
-        # normalize numeric features (ไม่แตะ time)
-        num_cols = feat.select_dtypes(include=[np.number]).columns
-        mu = feat[num_cols].mean()
-        sd = feat[num_cols].std().replace(0, 1.0)
-        feat[num_cols] = (feat[num_cols] - mu) / (sd + 1e-9)
+    def step(self, action: int) -> Tuple[Dict[str, Any], float, bool, Dict[str, Any]]:
+        """
+        action: 0 hold, 1 open/add long, 2 exit-all
+        """
+        assert action in (0, 1, 2)
+        done = False
+        info: Dict[str, Any] = {}
+        self._daily_reset_if_needed()
 
-        self.df = feat[num_cols].copy()
-        self.feat_cols = list(self.df.columns)
+        # ใช้ราคาปิดเท่านั้น (on close bar)
+        px = self._price()
+        prev_equity = self.equity_hist[-1]
 
-        self.action_space = spaces.Discrete(3)
-        self.observation_space = spaces.Box(
-            low=-np.inf, high=np.inf, shape=(len(self.feat_cols),), dtype=np.float32
-        )
+        # Spike filter: skip ทุกอย่างถ้าเป็น spike bar
+        if self.data.loc[self.i, "is_spike"]:
+            action = 0  # บังคับ hold
 
-        # episode state
-        self.current_step = 0
-        self.step_count = 0
-        self.balance = float(INITIAL_BALANCE)
-        self.equity  = float(INITIAL_BALANCE)
+        # Risk/day cap guard
+        if self.daily_risk_used >= config.DAILY_RISK_CAP * prev_equity:
+            action = 0
 
-        # position state
-        self.pos_sign = 0      # -1 / 0 / +1
-        self.pos_units = 0.0
-        self.entry_price = 0.0
-        self.sl = None
-        self._current_trade_pnl = 0.0  # sum of mtm since entry (for metrics)
+        # --- Execute ---
+        step_pnl = 0.0
+        if action == 1:
+            # open/add long เฉพาะเมื่อ trend ok และ cross up (เป็น entry เชิงตัวอย่าง)
+            can_long = (self.data.loc[self.i, "ema_fast"] > self.data.loc[self.i, "ema_slow"]) \
+                       and (self.data.loc[self.i, "close"] > self.data.loc[self.i, "ema_trend"])
+            if can_long:
+                risk_val = self._risk_per_trade_value()
+                # ตั้ง SL = entry - ATR*X เพื่อคำนวณปริมาณ
+                atr = float(self.data.loc[self.i, "atr14"]) or 0.0
+                sl_buffer = max(atr * 1.5, 0.5)  # กัน 0
+                stop_px = px - sl_buffer
+                per_unit_risk = max(px - stop_px, 1e-4) * self.contract
+                qty = max(int(risk_val / per_unit_risk), 1)
+                if self.pos.side == 0:
+                    self.pos = Position(side=+1, entry=px, qty=qty, sl=stop_px, group_id=self._open_groups)
+                elif self.pos.side == +1:
+                    # pyramiding เฉพาะเมื่อกำไร
+                    if px > self.pos.entry:
+                        self.pos.qty += qty
+                # บันทึก risk ใช้ไป (คง conservative เล็กน้อย)
+                self.daily_risk_used += config.RISK_PER_TRADE * prev_equity
 
-        # logs
-        self.equity_curve = [self.equity]
-        self.trade_pnls: list[float] = []
-        self.trades = 0
+        elif action == 2:
+            # exit all
+            if self.pos.side != 0:
+                step_pnl += self._position_value(px)
+                self.cash += step_pnl
+                self.pos = Position()  # flat
 
-        self.n_bars = len(self.df)
-
-    # ===== Gymnasium API =====
-    def reset(self, *, seed=None, options=None):
-        super().reset(seed=seed)
-        self.current_step = 0
-        self.step_count = 0
-        self.balance = float(INITIAL_BALANCE)
-        self.equity  = float(INITIAL_BALANCE)
-        self.pos_sign = 0
-        self.pos_units = 0.0
-        self.entry_price = 0.0
-        self.sl = None
-        self._current_trade_pnl = 0.0
-        self.equity_curve = [self.equity]
-        self.trade_pnls = []
-        self.trades = 0
-        return self._obs(), {}
-
-    def step(self, action: int):
-        terminated = False
-        truncated = False
-        reward = 0.0
-
-        idx = self.current_step
-        price = self._close[idx]
-        atr   = max(self._atr[idx], 1e-9)
-
-        # === 1) Update MTM & trailing/breakeven if in position ===
-        if self.pos_sign != 0 and idx > 0:
-            prev_price = self._close[idx - 1]
-            pnl_delta = (price - prev_price) * (1 if self.pos_sign > 0 else -1) \
-                        * self.pos_units * LOT_SIZE
-            self.balance += pnl_delta
-            self._current_trade_pnl += pnl_delta
-            reward += pnl_delta / max(abs(self.balance), 1e-6)  # step shaping เบาๆ
-
-            # Breakeven trigger
-            if (self.pos_sign > 0 and price - self.entry_price >= BE_AFTER_ATR * atr) or \
-               (self.pos_sign < 0 and self.entry_price - price >= BE_AFTER_ATR * atr):
-                self.sl = max(self.sl, self.entry_price) if self.pos_sign > 0 else \
-                          min(self.sl, self.entry_price)
-
+        # move trailing SL / breakeven guard (อย่างย่อ)
+        if self.pos.side == +1 and self.pos.qty > 0:
+            atr = float(self.data.loc[self.i, "atr14"]) or 0.0
+            # breakeven guard หลังได้ 1R
+            R = (px - self.pos.entry) / max(atr, 1e-4)
+            if R >= config.BREAKEVEN_AFTER_R_MULT:
+                self.pos.sl = max(self.pos.sl or self.pos.entry, self.pos.entry)
             # ATR trailing
-            if self.pos_sign > 0:
-                trail = price - ATR_TRAIL_MULT * atr
-                self.sl = max(self.sl or -np.inf, trail)
-            elif self.pos_sign < 0:
-                trail = price + ATR_TRAIL_MULT * atr
-                self.sl = min(self.sl or np.inf, trail)
+            trail = px - config.ATR_TRAIL_MULT * atr
+            if self.pos.sl is None:
+                self.pos.sl = trail
+            else:
+                self.pos.sl = max(self.pos.sl, trail)
+            # ถ้าหลุด SL → ปิดสถานะ
+            if px <= (self.pos.sl or -1e9):
+                step_pnl += self._position_value(self.pos.sl)
+                self.cash += step_pnl
+                self.pos = Position()
 
-            # Check stop
-            if (self.pos_sign > 0 and price <= (self.sl or -np.inf)) or \
-               (self.pos_sign < 0 and price >= (self.sl or np.inf)):
-                self._close_trade(price)
+        # MTM equity
+        mtm = self._position_value(px)
+        equity = self.cash + mtm
+        self.equity_hist.append(equity)
 
-        # === 2) Handle action / open or flip position ===
-        if action in (1, 2):
-            target_sign = 1 if action == 1 else -1
+        # reward
+        reward = step_reward(step_pnl=equity - prev_equity, equity_curve=np.array(self.equity_hist, dtype=float))
 
-            # spike filter: ห้ามเปิดไม้ใหม่เมื่อเหวี่ยงแรง
-            if idx > 0:
-                if abs(self._close[idx] - self._close[idx - 1]) > SPIKE_ATR_MULT * atr:
-                    target_sign = 0  # ignore signal
-
-            if target_sign != self.pos_sign:
-                # flip: close old first
-                if self.pos_sign != 0:
-                    self._close_trade(price)
-                # open new
-                if target_sign != 0:
-                    self._open_trade(target_sign, price, atr)
-
-        # === 3) advance ===
-        self.equity = self.balance
-        self.equity_curve.append(self.equity)
-
-        self.current_step += 1
-        self.step_count += 1
-
-        if self.current_step >= self.n_bars - 1:
-            terminated = True
-        if self.step_count >= int(MAX_STEPS):
-            truncated = True
-
-        if terminated or truncated:
-            if self.pos_sign != 0:
-                self._close_trade(self._close[min(self.current_step, self.n_bars - 1)])
-
-        return self._obs(), float(reward), terminated, truncated, {}
-
-    # ===== helpers =====
-    def _obs(self):
-        return self.df.loc[self.current_step, self.feat_cols].to_numpy(dtype=np.float32)
-
-    def _open_trade(self, sign: int, price: float, atr: float):
-        # risk-based sizing: risk = equity * RISK_PCT_TRADE, SL distance = ATR_SL_MULT*ATR
-        risk_cash = self.equity * RISK_PCT_TRADE
-        sl_dist = ATR_SL_MULT * atr
-        units = risk_cash / max(sl_dist * LOT_SIZE, 1e-9)
-        units = float(np.clip(units, UNITS_MIN, UNITS_MAX))
-
-        self.pos_sign = sign
-        self.pos_units = units
-        self.entry_price = price
-        self.sl = price - sl_dist if sign > 0 else price + sl_dist
-        self._current_trade_pnl = 0.0
-        self.trades += 1  # count immediately on open
-
-    def _close_trade(self, exit_price: float):
-        # realize costs only here (MTM ถูกสะสมไปแล้ว)
-        round_cost = (SPREAD_COST * self.pos_units * LOT_SIZE) + \
-                     (COMMISSION_PER_UNIT * self.pos_units)
-        self.balance -= round_cost
-
-        # สำหรับสถิติระดับ "ไม้": เอา PnL ตั้งแต่เปิดจนปิด หักต้นทุน
-        realized = self._current_trade_pnl - round_cost
-        self.trade_pnls.append(realized)
-
-        # reset position
-        self.pos_sign = 0
-        self.pos_units = 0.0
-        self.entry_price = 0.0
-        self.sl = None
-        self._current_trade_pnl = 0.0
-
-    def render(self):
-        print(f"t={self.current_step} pos={self.pos_sign} units={self.pos_units:.2f} "
-              f"bal={self.balance:.2f} eq={self.equity:.2f}")
+        # step next
+        self.i += 1
+        if self.i >= len(self.data) - 1:
+            done = True
+        return self._obs(), float(reward), bool(done), info
