@@ -22,8 +22,8 @@ def sig_turtle(df: pd.DataFrame, n: int) -> pd.Series:
     s[df["close"] < ll.shift(1)] = -1
     return s
 
-def sig_meanrev(df: pd.DataFrame) -> pd.Series:
-    up, low, ma = bbands(df["close"], n=20, k=2.0)
+def sig_meanrev(df: pd.DataFrame, n: int = 20, k: float = 2.0) -> pd.Series:
+    up, low, _ = bbands(df["close"], n=n, k=k)
     s = pd.Series(0, index=df.index)
     s[df["close"] > up]  = -1
     s[df["close"] < low] = 1
@@ -34,6 +34,6 @@ def combined_signal(df: pd.DataFrame) -> pd.DataFrame:
     out["ema"]      = sig_ema(df)
     out["turtle20"] = sig_turtle(df, 20)
     out["turtle55"] = sig_turtle(df, 55)
-    out["meanrev"]  = sig_meanrev(df)
-    out["spike"]    = spike_flag(df)  # 1 = spike, หลีกเลี่ยงเข้าไม้
+    out["meanrev"]  = sig_meanrev(df, 20, 2.0)
+    out["spike"]    = spike_flag(df)  # 1 = spike, ใช้ปิดสัญญาณชั่วคราว
     return out
