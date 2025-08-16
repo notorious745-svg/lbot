@@ -1,8 +1,7 @@
+# core/__init__.py
 """
 L-Bot core package
-==================
-รวม logic หลักของระบบ L-Bot:
-- entries:  signal detection
-- position_manager: position/group/magic management
-- runner: main orchestrator
+- entries: สร้างสัญญาณเข้า (EMA trend + spike filter)
+- position_manager: sizing, stop, trailing, pyramiding
+- runner: orchestrator โหลดข้อมูล → สร้างฟีเจอร์ → loop backtest
 """
