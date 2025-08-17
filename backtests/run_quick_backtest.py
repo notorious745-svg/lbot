@@ -25,6 +25,9 @@ def max_drawdown(series: pd.Series) -> float:
     dd = (eq/peak) - 1.0
     return float(-dd.min()) if len(dd) else 0.0
 
+def parse_strats(s: str) -> list[str]:
+    return [x.strip() for x in s.split(",") if x.strip()]
+
 if __name__ == "__main__":
     p = argparse.ArgumentParser()
     p.add_argument("--minutes", type=int, default=None)
@@ -32,9 +35,10 @@ if __name__ == "__main__":
     p.add_argument("--atr_n", type=int, default=14)
     p.add_argument("--atr_mult", type=float, default=2.5)
     p.add_argument("--pyr_step_atr", type=float, default=1.0)
-    p.add_argument("--max_layers", type=int, default=2)
-    p.add_argument("--session", type=str, default="ln_ny")      # ln_ny / none
+    p.add_argument("--max_layers", type=int, default=0)          # เริ่มจาก NO pyramiding เพื่อลด churn
+    p.add_argument("--session", type=str, default="ln_ny")       # ln_ny / none
     p.add_argument("--no_spike_mask", action="store_true")
+    p.add_argument("--strats", type=str, default="ema,turtle20,turtle55")  # trend-only
     args, _ = p.parse_known_args()
 
     df = load_price_csv()
@@ -47,6 +51,7 @@ if __name__ == "__main__":
         df,
         use_spike_mask=(not args.no_spike_mask),
         session=args.session,
+        include=parse_strats(args.strats),
     )
 
     pos = generate_position_series(
