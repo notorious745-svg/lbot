@@ -43,7 +43,7 @@ def generate_position_series(
     for i in range(n):
         price = float(px[i]); ai = float(max(1e-9, a.iat[i])); bt = int(base.iat[i])
 
-        # trailing
+        # trailing stop
         if cur_pos > 0:
             peak = price if peak is None else max(peak, price)
             t = peak - atr_mult * ai
@@ -59,12 +59,12 @@ def generate_position_series(
                 cur_pos = 0; avg_entry = np.nan; layers = 0
                 peak = trough = trail = None; last_change_i = i
 
-        # opposite -> flatten
+        # ตรงข้ามแรง -> ปิดก่อน
         if flatten_on_opposite and cur_pos != 0 and bt * cur_pos < 0:
             cur_pos = 0; avg_entry = np.nan; layers = 0
             peak = trough = trail = None; last_change_i = i
 
-        # open with cooldown
+        # เปิดไม้แรกต้องพ้นคูลดาวน์
         can_open = (i - last_change_i) >= cooldown_bars
         if cur_pos == 0:
             if can_open:
@@ -75,6 +75,7 @@ def generate_position_series(
                     cur_pos = -1; avg_entry = price; layers = 0
                     trough = price; peak = None; trail = trough + atr_mult * ai; last_change_i = i
         else:
+            # Pyramiding เฉพาะกำไร
             if max_layers > 0:
                 if cur_pos > 0 and bt > cur_pos and layers < max_layers:
                     trigger = avg_entry + (layers + 1) * pyramid_step_atr * ai
