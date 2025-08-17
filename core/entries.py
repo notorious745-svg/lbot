@@ -1,3 +1,4 @@
+$entries = @'
 from __future__ import annotations
 import pandas as pd
 from core.indicators import ema, bbands
@@ -37,3 +38,5 @@ def combined_signal(df: pd.DataFrame) -> pd.DataFrame:
     out["meanrev"]  = sig_meanrev(df, 20, 2.0)
     out["spike"]    = spike_flag(df)  # 1 = spike, ใช้ปิดสัญญาณชั่วคราว
     return out
+'@
+Set-Content -Encoding utf8 core\entries.py $entries
