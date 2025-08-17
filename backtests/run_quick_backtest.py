@@ -33,6 +33,8 @@ if __name__ == "__main__":
     p.add_argument("--atr_mult", type=float, default=2.5)
     p.add_argument("--pyr_step_atr", type=float, default=1.0)
     p.add_argument("--max_layers", type=int, default=2)
+    p.add_argument("--session", type=str, default="ln_ny")      # ln_ny / none
+    p.add_argument("--no_spike_mask", action="store_true")
     args, _ = p.parse_known_args()
 
     df = load_price_csv()
@@ -41,7 +43,12 @@ if __name__ == "__main__":
         start = end - timedelta(minutes=args.minutes)
         df = df[df["time"] >= start].reset_index(drop=True)
 
-    sig = combined_signal(df)
+    sig = combined_signal(
+        df,
+        use_spike_mask=(not args.no_spike_mask),
+        session=args.session,
+    )
+
     pos = generate_position_series(
         df, sig,
         atr_n=args.atr_n,
