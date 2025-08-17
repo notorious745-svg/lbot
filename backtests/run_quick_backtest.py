@@ -1,11 +1,10 @@
+$rqb = @'
 from __future__ import annotations
-# --- allow importing 'core' when run as a script from backtests/ ---
 import sys
 from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
-# ------------------------------------------------------------------
 
 import argparse, numpy as np, pandas as pd
 from datetime import timedelta
@@ -39,8 +38,8 @@ if __name__ == "__main__":
     p.add_argument("--session", type=str, default="ln_ny")
     p.add_argument("--no_spike_mask", action="store_true")
     p.add_argument("--strats", type=str, default="ema,turtle20,turtle55")
-    p.add_argument("--vote", type=int, default=2)        # ← ใหม่
-    p.add_argument("--cooldown", type=int, default=8)    # ← ใหม่
+    p.add_argument("--vote", type=int, default=2)
+    p.add_argument("--cooldown", type=int, default=8)
     args, _ = p.parse_known_args()
 
     df = load_price_csv()
@@ -58,12 +57,9 @@ if __name__ == "__main__":
 
     pos = generate_position_series(
         df, sig,
-        atr_n=args.atr_n,
-        atr_mult=args.atr_mult,
-        pyramid_step_atr=args.pyr_step_atr,
-        max_layers=args.max_layers,
-        vote_required=args.vote,
-        cooldown_bars=args.cooldown
+        atr_n=args.atr_n, atr_mult=args.atr_mult,
+        pyramid_step_atr=args.pyr_step_atr, max_layers=args.max_layers,
+        vote_required=args.vote, cooldown_bars=args.cooldown
     )
 
     out = pd.DataFrame(index=df.index)
@@ -75,11 +71,8 @@ if __name__ == "__main__":
     out["pnl_net"] = out["pnl_gross"] - (turns > 0).astype(int) * fee
 
     trades = int((out["pos"].diff().abs() > 0).sum() // 2)
-    shp = sharpe_per_bar(out["pnl_net"])
-    mdd = max_drawdown(out["pnl_net"])
-
-    print(f"SYMBOL={args.symbol}")
-    print(f"BARS={len(df)}")
-    print(f"TRADES={trades}")
-    print(f"SHARPE={shp:.6f}")
-    print(f"MAXDD={mdd:.6f}")
+    shp = sharpe_per_bar(out["pnl_net"]); mdd = max_drawdown(out["pnl_net"])
+    print(f"SYMBOL={args.symbol}"); print(f"BARS={len(df)}")
+    print(f"TRADES={trades}"); print(f"SHARPE={shp:.6f}"); print(f"MAXDD={mdd:.6f}")
+'@
+Set-Content -Encoding utf8 backtests\run_quick_backtest.py $rqb
