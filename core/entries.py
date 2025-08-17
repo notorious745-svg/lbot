@@ -1,3 +1,4 @@
+$entries = @'
 from __future__ import annotations
 import pandas as pd
 from datetime import time
@@ -34,33 +35,32 @@ def session_mask_bkk(df: pd.DataFrame, mode: str | None = "ln_ny") -> pd.Series:
     if not mode or mode.lower() in ("none", "all"):
         return pd.Series(True, index=df.index)
     t = df["time"].dt.time
-    ln = (t >= time(13,0)) & (t <= time(22,30))          # London (BKK)
-    ny = (t >= time(20,30)) | (t <= time(4,0))           # New York (BKK, ข้ามวัน)
+    ln = (t >= time(13,0)) & (t <= time(22,30))   # London (BKK)
+    ny = (t >= time(20,30)) | (t <= time(4,0))    # New York (BKK, ข้ามวัน)
     return ln | ny
 
 def combined_signal(
     df: pd.DataFrame,
     use_spike_mask: bool = True,
     session: str | None = "ln_ny",
-    include: list[str] | tuple[str, ...] = ("ema","turtle20","turtle55"),  # default: trend-only
+    include: list[str] | tuple[str, ...] = ("ema","turtle20","turtle55"),
 ) -> pd.DataFrame:
-    out = pd.DataFrame(index=df.index)
-    # สร้างทุกตัวก่อน
-    out["ema"]      = sig_ema(df)
-    out["turtle20"] = sig_turtle(df, 20)
-    out["turtle55"] = sig_turtle(df, 55)
-    out["meanrev"]  = sig_meanrev(df, 20, 2.0)
-    out["spike"]    = spike_flag(df)  # 1 = spike
+    allsig = pd.DataFrame(index=df.index)
+    allsig["ema"]      = sig_ema(df)
+    allsig["turtle20"] = sig_turtle(df, 20)
+    allsig["turtle55"] = sig_turtle(df, 55)
+    allsig["meanrev"]  = sig_meanrev(df, 20, 2.0)
+    allsig["spike"]    = spike_flag(df)  # 1 = spike
 
-    # mask ช่วงที่ไม่เทรด
     mask = pd.Series(True, index=df.index)
     if use_spike_mask:
-        mask &= (out["spike"] == 0)
+        mask &= (allsig["spike"] == 0)
     mask &= session_mask_bkk(df, session)
 
     for c in ("ema","turtle20","turtle55","meanrev"):
-        out[c] = out[c].where(mask, 0)
+        allsig[c] = allsig[c].where(mask, 0)
 
-    # เก็บเฉพาะสัญญาณที่ user ขอ
-    keep = [c for c in include if c in out.columns]
-    return out[keep + (["spike"] if "spike" in out.columns else [])]
+    keep = [c for c in include if c in allsig.columns]
+    return allsig[keep + (["spike"] if "spike" in allsig.columns else [])]
+'@
+Set-Content -Encoding utf8 core\entries.py $entries
