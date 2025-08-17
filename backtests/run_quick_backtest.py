@@ -33,12 +33,14 @@ if __name__ == "__main__":
     p.add_argument("--minutes", type=int, default=None)
     p.add_argument("--symbol", type=str, default="XAUUSD")
     p.add_argument("--atr_n", type=int, default=14)
-    p.add_argument("--atr_mult", type=float, default=2.5)
-    p.add_argument("--pyr_step_atr", type=float, default=1.0)
-    p.add_argument("--max_layers", type=int, default=0)          # เริ่มจาก NO pyramiding เพื่อลด churn
-    p.add_argument("--session", type=str, default="ln_ny")       # ln_ny / none
+    p.add_argument("--atr_mult", type=float, default=3.0)
+    p.add_argument("--pyr_step_atr", type=float, default=1.2)
+    p.add_argument("--max_layers", type=int, default=0)
+    p.add_argument("--session", type=str, default="ln_ny")
     p.add_argument("--no_spike_mask", action="store_true")
-    p.add_argument("--strats", type=str, default="ema,turtle20,turtle55")  # trend-only
+    p.add_argument("--strats", type=str, default="ema,turtle20,turtle55")
+    p.add_argument("--vote", type=int, default=2)        # ← ใหม่
+    p.add_argument("--cooldown", type=int, default=8)    # ← ใหม่
     args, _ = p.parse_known_args()
 
     df = load_price_csv()
@@ -59,7 +61,9 @@ if __name__ == "__main__":
         atr_n=args.atr_n,
         atr_mult=args.atr_mult,
         pyramid_step_atr=args.pyr_step_atr,
-        max_layers=args.max_layers
+        max_layers=args.max_layers,
+        vote_required=args.vote,
+        cooldown_bars=args.cooldown
     )
 
     out = pd.DataFrame(index=df.index)
