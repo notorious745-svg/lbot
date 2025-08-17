@@ -31,26 +31,28 @@ def sig_meanrev(df: pd.DataFrame, n: int = 20, k: float = 2.0) -> pd.Series:
     return s
 
 def session_mask_bkk(df: pd.DataFrame, mode: str | None = "ln_ny") -> pd.Series:
-    """True = ในช่วงที่อนุญาต (เวลา BKK)"""
-    if not mode or mode.lower() in ("none","all"):
+    if not mode or mode.lower() in ("none", "all"):
         return pd.Series(True, index=df.index)
     t = df["time"].dt.time
-    ln = (t >= time(13,0)) & (t <= time(22,30))         # London 13:00–22:30 BKK
-    ny = (t >= time(20,30)) | (t <= time(4,0))          # New York 20:30–04:00 BKK (ข้ามวัน)
-    return (ln | ny)
+    ln = (t >= time(13,0)) & (t <= time(22,30))          # London (BKK)
+    ny = (t >= time(20,30)) | (t <= time(4,0))           # New York (BKK, ข้ามวัน)
+    return ln | ny
 
 def combined_signal(
     df: pd.DataFrame,
     use_spike_mask: bool = True,
     session: str | None = "ln_ny",
+    include: list[str] | tuple[str, ...] = ("ema","turtle20","turtle55"),  # default: trend-only
 ) -> pd.DataFrame:
     out = pd.DataFrame(index=df.index)
+    # สร้างทุกตัวก่อน
     out["ema"]      = sig_ema(df)
     out["turtle20"] = sig_turtle(df, 20)
     out["turtle55"] = sig_turtle(df, 55)
     out["meanrev"]  = sig_meanrev(df, 20, 2.0)
     out["spike"]    = spike_flag(df)  # 1 = spike
 
+    # mask ช่วงที่ไม่เทรด
     mask = pd.Series(True, index=df.index)
     if use_spike_mask:
         mask &= (out["spike"] == 0)
@@ -59,4 +61,6 @@ def combined_signal(
     for c in ("ema","turtle20","turtle55","meanrev"):
         out[c] = out[c].where(mask, 0)
 
-    return out
+    # เก็บเฉพาะสัญญาณที่ user ขอ
+    keep = [c for c in include if c in out.columns]
+    return out[keep + (["spike"] if "spike" in out.columns else [])]
