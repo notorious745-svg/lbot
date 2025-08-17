@@ -1,66 +1,111 @@
-$entries = @'
 from __future__ import annotations
+
+from typing import Iterable, List
+import numpy as np
 import pandas as pd
-from datetime import time
-from core.indicators import ema, bbands
+
 from core.spike_filter import spike_flag
 
-def sig_ema(df: pd.DataFrame) -> pd.Series:
-    e10, e20, e50 = ema(df["close"], 10), ema(df["close"], 20), ema(df["close"], 50)
-    s = pd.Series(0, index=df.index)
-    s[(e10 > e20) & (e20 > e50)] = 1
-    s[(e10 < e20) & (e20 < e50)] = -1
-    return s
 
-def _turtle_channel(series: pd.Series, n: int):
-    hh = series.rolling(n, min_periods=n).max()
-    ll = series.rolling(n, min_periods=n).min()
-    return hh, ll
+def _ema(series: pd.Series, n: int) -> pd.Series:
+    return series.ewm(span=n, adjust=False).mean()
 
-def sig_turtle(df: pd.DataFrame, n: int) -> pd.Series:
-    hh, ll = _turtle_channel(df["close"], n)
-    s = pd.Series(0, index=df.index)
-    s[df["close"] > hh.shift(1)] = 1
-    s[df["close"] < ll.shift(1)] = -1
-    return s
 
-def sig_meanrev(df: pd.DataFrame, n: int = 20, k: float = 2.0) -> pd.Series:
-    up, low, _ = bbands(df["close"], n=n, k=k)
-    s = pd.Series(0, index=df.index)
-    s[df["close"] > up]  = -1
-    s[df["close"] < low] = 1
-    return s
+def _ema_cross(df: pd.DataFrame, fast: int = 20, slow: int = 55) -> pd.Series:
+    e1 = _ema(df["close"], fast)
+    e2 = _ema(df["close"], slow)
+    sig = pd.Series(0.0, index=df.index)
+    sig[e1 > e2] = 1.0
+    sig[e1 < e2] = -1.0
+    return sig.ffill().fillna(0.0)
 
-def session_mask_bkk(df: pd.DataFrame, mode: str | None = "ln_ny") -> pd.Series:
-    if not mode or mode.lower() in ("none", "all"):
-        return pd.Series(True, index=df.index)
-    t = df["time"].dt.time
-    ln = (t >= time(13,0)) & (t <= time(22,30))   # London (BKK)
-    ny = (t >= time(20,30)) | (t <= time(4,0))    # New York (BKK, ข้ามวัน)
-    return ln | ny
+
+def _turtle_breakout(df: pd.DataFrame, n: int = 20) -> pd.Series:
+    hh = df["high"].rolling(n).max()
+    ll = df["low"].rolling(n).min()
+    sig = pd.Series(0.0, index=df.index)
+    sig[df["close"] > hh.shift(1)] = 1.0
+    sig[df["close"] < ll.shift(1)] = -1.0
+    return sig.ffill().fillna(0.0)
+
+
+def _majority_vote(sigs: List[pd.Series], vote: int) -> pd.Series:
+    # ลงคะแนน -1/0/+1 แล้วรวม ถ้า |sum| >= vote ให้เอาทิศทาง sign(sum) มิฉะนั้น 0
+    s = pd.concat(sigs, axis=1).fillna(0.0)
+    sm = s.sum(axis=1)
+    out = pd.Series(0.0, index=s.index)
+    out[sm >= vote] = 1.0
+    out[sm <= -vote] = -1.0
+    return out
+
+
+def _apply_cooldown(sig: pd.Series, cooldown: int) -> pd.Series:
+    if cooldown <= 0:
+        return sig
+    sig = sig.copy()
+    last = 0.0
+    cd = 0
+    for i, v in enumerate(sig.values):
+        if v != 0 and np.sign(v) != np.sign(last):
+            last = v
+            cd = cooldown
+        elif cd > 0:
+            # ปิดการเปลี่ยนสถานะระหว่าง cooldown
+            sig.iloc[i] = last
+            cd -= 1
+        else:
+            last = v
+    return sig
+
 
 def combined_signal(
-    df: pd.DataFrame,
-    use_spike_mask: bool = True,
-    session: str | None = "ln_ny",
-    include: list[str] | tuple[str, ...] = ("ema","turtle20","turtle55"),
-) -> pd.DataFrame:
-    allsig = pd.DataFrame(index=df.index)
-    allsig["ema"]      = sig_ema(df)
-    allsig["turtle20"] = sig_turtle(df, 20)
-    allsig["turtle55"] = sig_turtle(df, 55)
-    allsig["meanrev"]  = sig_meanrev(df, 20, 2.0)
-    allsig["spike"]    = spike_flag(df)  # 1 = spike
+    d: pd.DataFrame,
+    strats: Iterable[str] | None = None,
+    atr_n: int = 14,
+    atr_mult: float = 3.0,
+    vote: int = 1,
+    cooldown: int = 0,
+    session: str = "all",
+) -> pd.Series:
+    """
+    คืนค่า entry signal แบบ -1/0/+1
+    - strats: ชื่อกลยุทธ์ เช่น ['ema','turtle20','turtle55']
+    - vote: จำนวนเสียงที่ต้องถึง (majority)
+    - cooldown: จำนวนแท่งที่จะคงสถานะหลังสลับฝั่ง
+    """
+    if strats is None:
+        strats = ["ema", "turtle20", "turtle55"]
 
-    mask = pd.Series(True, index=df.index)
-    if use_spike_mask:
-        mask &= (allsig["spike"] == 0)
-    mask &= session_mask_bkk(df, session)
+    sigs: List[pd.Series] = []
 
-    for c in ("ema","turtle20","turtle55","meanrev"):
-        allsig[c] = allsig[c].where(mask, 0)
+    for s in strats:
+        s = s.strip().lower()
+        if s == "ema":
+            sigs.append(_ema_cross(d, 20, 55))
+        elif s.startswith("turtle"):
+            # ดึงตัวเลข n จากชื่อ เช่น turtle20, turtle55
+            n = 20
+            try:
+                n = int("".join(ch for ch in s if ch.isdigit()) or "20")
+            except Exception:
+                pass
+            sigs.append(_turtle_breakout(d, n))
+        else:
+            # ไม่รู้จักชื่อ -> ให้ศูนย์
+            sigs.append(pd.Series(0.0, index=d.index))
 
-    keep = [c for c in include if c in allsig.columns]
-    return allsig[keep + (["spike"] if "spike" in allsig.columns else [])]
-'@
-Set-Content -Encoding utf8 core\entries.py $entries
+    vote = max(1, int(vote))
+    sig = _majority_vote(sigs, vote)
+
+    # เซสชัน: เพื่อความง่าย เวอร์ชันนี้ยังไม่ตัดชั่วโมงเทรด (คงไว้ทั้งหมด)
+    # ถ้าต้องการภายหลังค่อยเติม mask ตาม session
+
+    # ตัด spike ออก (ป้องกันความผันผวนจัด)
+    try:
+        sp = spike_flag(d, n=atr_n, k=atr_mult)
+        sig[sp > 0] = 0.0
+    except Exception:
+        pass
+
+    sig = _apply_cooldown(sig, cooldown)
+    return sig.astype(float)
