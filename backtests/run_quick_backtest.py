@@ -1,6 +1,8 @@
 # backtests/run_quick_backtest.py
+# Minimal working runner for XAUUSD 15m using Turtle/EMA votes + ATR stop.
+# CLI: --minutes --symbol --session --strats --atr_n --atr_mult --max_layers --pyr_step_atr --vote --cooldown
 from __future__ import annotations
-import argparse
+import argparse, sys
 from pathlib import Path
 import pandas as pd
 import numpy as np
@@ -9,109 +11,171 @@ ROOT = Path(__file__).resolve().parents[1]
 DATA = ROOT / "data" / "XAUUSD_15m_clean.csv"
 OUT  = ROOT / "backtests" / "out.txt"
 
-def ema(s: pd.Series, n: int) -> pd.Series:
-    return s.ewm(span=n, min_periods=n).mean()
+def ema(s, span):
+    return s.ewm(span=span, adjust=False, min_periods=span).mean()
 
-def turtle(df: pd.DataFrame, n: int):
-    hh = df["close"].rolling(n).max().shift(1)
-    ll = df["close"].rolling(n).min().shift(1)
-    return (df["close"] > hh), (df["close"] < ll)
+def true_range(df):
+    prev_close = df["close"].shift(1)
+    tr = pd.concat([
+        (df["high"] - df["low"]).abs(),
+        (df["high"] - prev_close).abs(),
+        (df["low"]  - prev_close).abs()
+    ], axis=1).max(axis=1)
+    return tr
 
-def compute_indicators(df: pd.DataFrame):
-    for n in (10, 20, 50):
-        df[f"ema{n}"] = ema(df["close"], n)
-    df["ema_long"]  = (df["ema10"] > df["ema20"]) & (df["ema20"] > df["ema50"])
-    df["ema_short"] = (df["ema10"] < df["ema20"]) & (df["ema20"] < df["ema50"])
-    t20l, t20s = turtle(df, 20)
-    t55l, t55s = turtle(df, 55)
-    df["t20_long"], df["t20_short"] = t20l, t20s
-    df["t55_long"], df["t55_short"] = t55l, t55s
-    return df
+def atr(df, n):
+    return true_range(df).rolling(n, min_periods=n).mean()
 
-def pick_strats_mask(df: pd.DataFrame, strats: list[str]) -> tuple[pd.Series, pd.Series]:
-    longs = []
-    shorts = []
-    for s in strats:
-        s = s.strip().lower()
-        if s == "ema":
-            longs.append(df["ema_long"]);  shorts.append(df["ema_short"])
-        elif s == "turtle20":
-            longs.append(df["t20_long"]);  shorts.append(df["t20_short"])
-        elif s == "turtle55":
-            longs.append(df["t55_long"]);  shorts.append(df["t55_short"])
-    if not longs:
-        # safety: ถ้าไม่รู้จัก strat ใด ๆ ให้ถือว่าไม่มีสัญญาณ
-        z = pd.Series(False, index=df.index)
-        return z, z
-    return pd.concat(longs, axis=1).sum(axis=1), pd.concat(shorts, axis=1).sum(axis=1)
+def turtle_signals(close, w):
+    hh = close.rolling(w).max().shift(1)
+    ll = close.rolling(w).min().shift(1)
+    long  = (close > hh).astype(int)
+    short = (close < ll).astype(int)
+    # ใช้เฉพาะ "เกิดสัญญาณใหม่" (cross) เพื่อลดสัญญาณซ้ำ
+    long  = (long.diff() == 1).astype(int)
+    short = (short.diff() == 1).astype(int)
+    return long, short
 
-def backtest(df: pd.DataFrame, strats: list[str], vote: int, cooldown: int) -> pd.DataFrame:
-    """
-    กติกาง่าย ๆ:
-      - เปิด Long ถ้า vote_long >= vote และมากกว่า vote_short
-      - เปิด Short ถ้า vote_short >= vote และมากกว่า vote_long
-      - ปิดเมื่อเจอสัญญาณฝั่งตรงข้าม
-      - ใช้ราคา close แท่งสัญญาณ (ไม่ intrabar)
-    """
-    vote_long, vote_short = pick_strats_mask(df, strats)
-    pos = 0   # 0=flat, 1=long, -1=short
-    entry_px = 0.0
-    entry_t  = None
+def ema_signals(close):
+    e10, e20 = ema(close,10), ema(close,20)
+    long  = ((e10 > e20) & (e10.shift(1) <= e20.shift(1))).astype(int)
+    short = ((e10 < e20) & (e10.shift(1) >= e20.shift(1))).astype(int)
+    return long, short
+
+def in_session(ts, session):
+    # CSV มีคอลัมน์ 'time' เป็นสตริง; แปลงเป็น datetime แบบ naive
+    hour = ts.hour
+    if session == "ln_ny":
+        # โซนกว้างๆ: 07:00–21:00 (UTC-ish) พอให้เทรดออกออเดอร์ได้
+        return 7 <= hour <= 21
+    return True  # "all" หรืออย่างอื่น → ไม่กรอง
+
+def run(args):
+    if not DATA.exists():
+        print(f"[!] price file not found: {DATA}")
+        sys.exit(2)
+
+    df = pd.read_csv(DATA)
+    # เลือกเฉพาะแท่งท้ายสุดตาม minutes (15m TF)
+    bars = max(1000, int(args.minutes // 15))
+    df = df.iloc[-bars:].copy()
+    # เตรียมเวลา
+    df["time"] = pd.to_datetime(df["time"])
+    df = df[df["time"].apply(lambda t: in_session(t, args.session))].copy()
+
+    # ATR
+    df["atr"] = atr(df, int(args.atr_n))
+
+    # สร้างสัญญาณตาม strats
+    strats = [s.strip().lower() for s in args.strats.split(",") if s.strip()]
+    sig_long = pd.Series(0, index=df.index)
+    sig_short= pd.Series(0, index=df.index)
+
+    if "turtle20" in strats:
+        l,s = turtle_signals(df["close"], 20); sig_long += l; sig_short += s
+    if "turtle55" in strats:
+        l,s = turtle_signals(df["close"], 55); sig_long += l; sig_short += s
+    if "ema" in strats:
+        l,s = ema_signals(df["close"]);       sig_long += l; sig_short += s
+
+    vote = int(args.vote)
+    want_long  = sig_long >= vote
+    want_short = sig_short >= vote
+
+    # backtest แบบ single position + ATR stop + cooldown
     trades = []
-
-    # กันกรณี cooldown>0 แล้วเปิดติด ๆ กัน (ที่นี่ใช้เป็น post-entry freeze)
-    cool = 0
+    pos = 0            # 0 none, +1 long, -1 short
+    entry = 0.0
+    entry_time = None
+    cooldown_left = 0
+    atr_mult = float(args.atr_mult)
+    cooldown = int(args.cooldown)
 
     for i in range(len(df)):
-        c = float(df["close"].iloc[i])
-        ts = df["time"].iloc[i] if "time" in df.columns else i
+        row = df.iloc[i]
+        price = row["close"]
+        a = row["atr"]
 
-        if pos == 0:
-            if cool > 0:
-                cool -= 1
+        # update stop
+        if pos != 0 and a > 0:
+            if pos == 1:
+                stop = entry - atr_mult * a
+                if row["low"] <= stop:  # hit stop
+                    exit_price = stop
+                    trades.append((entry_time, row["time"], "long", entry, exit_price, exit_price - entry))
+                    pos = 0; entry = 0.0; entry_time=None; cooldown_left = cooldown
+                    continue
             else:
-                if vote_long.iloc[i] >= vote and vote_long.iloc[i] > vote_short.iloc[i]:
-                    pos, entry_px, entry_t = 1, c, ts
-                    cool = cooldown
-                elif vote_short.iloc[i] >= vote and vote_short.iloc[i] > vote_long.iloc[i]:
-                    pos, entry_px, entry_t = -1, c, ts
-                    cool = cooldown
-        else:
-            if pos == 1 and vote_short.iloc[i] >= vote and vote_short.iloc[i] > vote_long.iloc[i]:
-                pnl = (c - entry_px) / entry_px
-                trades.append((entry_t, ts, "LONG", entry_px, c, pnl))
-                pos = 0
-            elif pos == -1 and vote_long.iloc[i] >= vote and vote_long.iloc[i] > vote_short.iloc[i]:
-                pnl = (entry_px - c) / entry_px
-                trades.append((entry_t, ts, "SHORT", entry_px, c, pnl))
-                pos = 0
+                stop = entry + atr_mult * a
+                if row["high"] >= stop:
+                    exit_price = stop
+                    trades.append((entry_time, row["time"], "short", entry, exit_price, entry - exit_price))
+                    pos = 0; entry = 0.0; entry_time=None; cooldown_left = cooldown
+                    continue
 
-    # force close ที่แท่งสุดท้าย ถ้ายังถืออยู่
-    if pos != 0:
-        c = float(df["close"].iloc[-1])
-        ts = df["time"].iloc[-1] if "time" in df.columns else len(df)-1
+        # cooldown
+        if cooldown_left > 0:
+            cooldown_left -= 1
+            continue
+
+        # exit on opposite vote
+        if pos == 1 and want_short.iloc[i]:
+            trades.append((entry_time, row["time"], "long", entry, price, price - entry))
+            pos = 0; entry=0.0; entry_time=None; cooldown_left = cooldown
+            continue
+        if pos == -1 and want_long.iloc[i]:
+            trades.append((entry_time, row["time"], "short", entry, price, entry - price))
+            pos = 0; entry=0.0; entry_time=None; cooldown_left = cooldown
+            continue
+
+        # entry
+        if pos == 0:
+            if want_long.iloc[i]:
+                pos = 1; entry = price; entry_time = row["time"]
+            elif want_short.iloc[i]:
+                pos = -1; entry = price; entry_time = row["time"]
+
+    # ปิดปลายทางถ้ายังมีโพสิชัน
+    if pos != 0 and entry_time is not None:
+        last_time = df["time"].iloc[-1]
+        last_px   = df["close"].iloc[-1]
         if pos == 1:
-            pnl = (c - entry_px) / entry_px
-            trades.append((entry_t, ts, "LONG", entry_px, c, pnl))
+            trades.append((entry_time, last_time, "long", entry, last_px, last_px - entry))
         else:
-            pnl = (entry_px - c) / entry_px
-            trades.append((entry_t, ts, "SHORT", entry_px, c, pnl))
+            trades.append((entry_time, last_time, "short", entry, last_px, entry - last_px))
 
-    # สร้าง equity จากผลตอบแทนต่อดีล (คูณต่อเนื่อง)
-    if trades:
-        tdf = pd.DataFrame(trades, columns=["entry_time","exit_time","side","entry","exit","ret"])
-        tdf["equity"] = (1.0 + tdf["ret"]).cumprod()
-    else:
-        tdf = pd.DataFrame(columns=["entry_time","exit_time","side","entry","exit","ret","equity"])
-    return tdf
+    # เขียนผล
+    OUT.parent.mkdir(parents=True, exist_ok=True)
+    tdf = pd.DataFrame(trades, columns=["time_in","time_out","side","entry","exit","pnl"])
+    tdf.to_csv(OUT, index=False)
 
-def slice_minutes(df: pd.DataFrame, minutes: int) -> pd.DataFrame:
-    if minutes is None or minutes <= 0:
-        return df
-    bars = max(1, minutes // 15)  # M15 → 15 นาทีต่อแท่ง
-    return df.iloc[-bars:].copy()
+    # คำนวณ metric แบบเร็ว (เผื่อ print_metrics ไม่รองรับ)
+    pnl = tdf["pnl"].values if len(tdf) else np.array([])
+    trades_n = int(len(tdf))
+    sharpe = float(0 if trades_n==0 else (np.mean(pnl) / (np.std(pnl)+1e-9)) * np.sqrt(252))
+    # max drawdown จาก equity
+    eq = np.cumsum(pnl) if trades_n else np.array([0.0])
+    peak = np.maximum.accumulate(eq)
+    dd = peak - eq
+    maxdd = float(0 if trades_n==0 else (np.max(dd) if len(dd) else 0.0))
+    print(f"sharpe={sharpe:.6f}")
+    print(f"maxdd={maxdd:.6f}")
+    print(f"trades={trades_n}")
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--minutes", type=int, required=True)
-    ap.add_argument("--symbol", type=str, default="X
+def parse_args(argv):
+    p = argparse.ArgumentParser()
+    p.add_argument("--minutes", type=int, required=True)
+    p.add_argument("--symbol", default="XAUUSD")
+    p.add_argument("--session", default="ln_ny", help="ln_ny|all")
+    p.add_argument("--strats", default="turtle20")
+    p.add_argument("--atr_n", type=int, default=20)
+    p.add_argument("--atr_mult", type=float, default=3.0)
+    p.add_argument("--max_layers", type=int, default=1)  # kept for CLI compat
+    p.add_argument("--pyr_step_atr", type=float, default=1.0)  # ignored in this minimal runner
+    p.add_argument("--vote", type=int, default=1)
+    p.add_argument("--cooldown", type=int, default=0)
+    return p.parse_args(argv)
+
+if __name__ == "__main__":
+    args = parse_args(sys.argv[1:])
+    run(args)
